@@ -1,5 +1,5 @@
 # Squarespace-order-aggregations
-Generate and email sorted packing lists and daily inventory using an automated Google Script
+Generate and email sorted packing lists and daily inventory from the SquareSpace Orders API using an automated Google Script
 
 This code references and updates a Google Sheets file with a tab that has the full list of items in inventory and for sale on the online squarespace site. 
 
