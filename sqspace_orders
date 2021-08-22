@@ -1,0 +1,566 @@
+// --------------------------------------------------------------------------------------------------
+//    SquareSpace Orders API to Emailed Packing List translator
+//    Copyright (C) 2020  Marena Lin. Modified from Will Bradley's
+//    SquareSpace Orders API to Google Sheets translator 
+//    Licensed under GNU GPLv3:
+//
+//    This program is free software: you can redistribute it and/or modify
+//    it under the terms of the GNU General Public License as published by
+//    the Free Software Foundation, either version 3 of the License, or
+//    (at your option) any later version.
+//
+//    This program is distributed in the hope that it will be useful,
+//    but WITHOUT ANY WARRANTY; without even the implied warranty of
+//    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+//    GNU General Public License for more details.
+//
+//    You should have received a copy of the GNU General Public License
+//    along with this program.  If not, see <https://www.gnu.org/licenses/>.
+// --------------------------------------------------------------------------------------------------
+
+var API_KEY = "abcdefghijkl"; // set to your squarespace api key
+var DEBUG = 2; // 0 is no logging, 1 is some logging, 2 is lots of logging
+var TIMEZONE = "America/Los_Angeles"; // assume California
+var START_ROW = 1; // fill the whole sheet (no other header data)
+var SORT_COLUMN = 5; // col 5 should be the order date
+var SHEET_NAME = "Squarespace_Imported_Orders"; // set to the spreadsheet tab name you want data to appear in
+var MASTER_SHEET_NAME = "Master (Reformatted)"; //key with all the product SKUs and categories are
+var WHOM_TO_EMAIL = "orders@gopagu.com"; //which email address are you sending the packing list to?
+
+/*
+ * Structure of SquareSpace Orders API response:
+ *
+ 
+{
+  "result" : [ {
+    "id" : "1a2c3d1a2c3d1a2c3d1a2c3d",
+    "orderNumber" : "108",
+    "createdOn" : DateTime,
+    "modifiedOn" : DateTime,
+    "testmode" : false,
+    "customerEmail" : "cust@example.com",
+    "billingAddress" : CustAddress,
+    "shippingAddress" : CustAddress,
+    "fulfillmentStatus" : "PENDING",
+    "lineItems" : [ {
+      "id" : "1a2c3d1a2c3d1a2c3d1a2c3d",
+      "sku" : "SQ0123456",
+      "productId" : "1a2c3d1a2c3d1a2c3d1a2c3d",
+      "productName" : "Some Product Name",
+      "quantity" : 1,
+      "unitPricePaid" : Currency,
+      "variantOptions" : [ {
+        "optionName" : "Date/Time",
+        "value" : "January 1st, 2019 10:00 AM-2:30 PM"
+      } ],
+      "customizations": [ {
+        "label":"Name",
+        "value":"Jane Doe"
+      }, {
+        "label":"E-mail",
+        "value":"jdoe@example.com"
+      }, {
+        "label":"Are you currently a Chimera member?",
+        "value":"No"
+      }, {
+        "label":"Phone Number",
+        "value":"707-555-1212"
+      }, {
+        "label":"Refund Policy",
+        "value":"I Agree"
+      } ],
+      "imageUrl" : "https://static1.squarespace.com/static/1234/1234/1234/IMG_1234.JPG?format=300w"
+    } ],
+    "internalNotes" : [ ],
+    "shippingLines" : [ ],
+    "discountLines" : [ ],
+    "formSubmission" : [ {
+      "label" : "Note / Additional Info",
+      "value" : ""
+    }, {
+      "label" : "If purchasing more than one class or item, please tell us who it is for:",
+      "value" : " "
+    } ],
+    "fulfillments" : [ ],
+    "subtotal" : Currency,
+    "shippingTotal" : Currency,
+    "discountTotal" : Currency,
+    "taxTotal" : Currency,
+    "refundedTotal" : Currency,
+    "grandTotal" : Currency
+  },
+  {...},
+  {...},
+  {...},
+  etc
+}
+*
+* Objects referenced above:
+*
+DateTime: "2019-04-25T13:39:38.187Z"
+Currency: {
+    "currency" : "USD",
+    "value" : "5.00"
+}
+CustAddress: {
+    "firstName" : "John",
+    "lastName" : "Smith",
+    "address1" : "123 main st",
+    "address2" : null,
+    "city" : "Sometown",
+    "state" : "CA",
+    "countryCode" : "US",
+    "postalCode" : "98765",
+    "phone" : "123-123-1234"
+}
+*
+* Example usage:
+*
+response['result'][0]['id']
+response['result'][0]['customerEmail']
+response['result'][0]['lineItems'][0]['productName']
+response['result'][0]['lineItems'][0]['quantity']
+response['result'][0]['lineItems'][0]['unitPricePaid']['value']
+response['result'][0]['lineItems'][0]['unitPricePaid']['value']
+response['result'][0]['grandTotal']['value']
+*
+* End API example
+*/
+
+var activeSheet = null;
+
+// custom menu
+function onOpen() {
+  var ui = SpreadsheetApp.getUi();
+  ui.createMenu('SquareSpace Order Import')
+      .addItem('Import Order Data','manuallyImportOrderData')
+      .addItem('Compute Inventory for Tomorrow','calculate_total_inventory_1')
+      .addItem('Compute Inventory for Past Week','calculate_total_inventory_7') 
+      .addToUi();
+}
+
+// function to call SquareSpace Orders API
+function callSquareSpaceOrdersAPI() {
+  var headers = {'Authorization': 'Bearer '+API_KEY};
+  var options = {'headers': headers};
+  var url = "https://api.squarespace.com/1.0/commerce/orders?fulfillmentStatus=PENDING&modifiedBEFORE=2020-10-10T12:00:00Z&modifiedAFTER=2020-03-20T12:00:00Z";
+  var raw = UrlFetchApp.fetch(url, options);
+  
+  // Parse the JSON reply
+  var response = JSON.parse(raw.getContentText());
+  
+  //if(DEBUG>=2){Logger.log(response);}
+  
+  return response;
+}
+
+ 
+function manuallyImportOrderData() {
+  // when doing it manually, set the sheet to the currently active one
+  activeSheet = ss.getActiveSheet();
+  importOrderData();
+}
+ 
+function onlyUnique(value, index, self) { 
+    return self.indexOf(value) === index;
+}
+
+
+//get the master_sheet
+var ss = SpreadsheetApp.getActiveSpreadsheet();
+key_sheet = ss.getSheetByName(MASTER_SHEET_NAME);
+
+var SKU_COLUMN = 6;
+function send_order_email(order_list){
+  //sort the output according to master key sheet
+  var list_rank = [];
+  order_list.forEach(function(row, index){
+    //find the row number associated with the sku
+    row_sku = row[SKU_COLUMN-1];
+    var keys = key_sheet.getRange(2, 4, key_sheet.getLastRow() - 1).getValues(); //this pulls all the SKUs
+    keys = keys.map(function(v) {return v[0];});  
+    var categories = key_sheet.getRange(2, 3, key_sheet.getLastRow() - 1).getValues(); //this pulls all the categories
+    var unique_categories = categories.filter( onlyUnique );
+    //append the row number to that row
+    var sheet_row_index = keys.indexOf(row_sku) + 2;
+    row.push(sheet_row_index);
+    row.push(categories[keys.indexOf(row_sku)]);
+    //list_rank.push(sheet_row_index);
+  });
+  var sortedlist = order_list.sort( function(a,b) {
+    var itemA = a[a.length-2]; // column 1 is at the 0 index number
+    var itemB = b[b.length-2]; // column 1 is at the 0 index number
+    if (itemA < itemB) {
+      return -1; // A is less than B, move B up
+    }
+    else if (itemA > itemB) {
+      return 1; // A is greater than B, move A down
+    }
+    return -1; // The SKU for this item isn't in the master key
+  });
+  
+  sortedlist.forEach(function(row, index){
+    Logger.log('Ordered:'+row[row.length-1]+', '+row[SKU_COLUMN-1]+', '+row[1]);
+  });
+  var htmlBody = '<b> CATEGORIZED PACKING LIST:</b> <ol>';
+  sortedlist.forEach(function(row, index){
+    htmlBody += '<li><b>' + row[row.length-1] + ":</b> Quantity <i>" + row[SKU_COLUMN] + '</i>, Item Name <i>' + row[2] + '</i>, <br>Variant(s) '+ row[3]+', SKU VALUE '+ row[SKU_COLUMN-1]+'</li>';
+  });
+  htmlBody += '</ol>';
+  var firstrow = sortedlist.shift();
+  orderjson = JSON.parse(firstrow[0]);
+  htmlBody = '<p> <b> Order Number: </b>'+ orderjson['orderNumber']+'</p>' + htmlBody;
+  htmlBody = '<p> <b> Customer Name: </b>'+ orderjson['billingAddress']['firstName']+' '+orderjson['billingAddress']['lastName']+'</p>' + htmlBody;
+  htmlBody = '<p> <b> Customer E-mail: </b>'+ orderjson['customerEmail']+'</p>' + htmlBody;
+  htmlBody = '<p> <b> Order Placed: </b>'+ orderjson['createdOn']+'</p>' + htmlBody;
+  htmlBody = '<p> <b> '+ firstrow[10]+'</b></p>' + htmlBody;
+  GmailApp.sendEmail(WHOM_TO_EMAIL,'PACKING LIST FOR ORDER NUMBER '+orderjson['orderNumber'],'',{htmlBody:htmlBody})
+  //send to email
+}
+
+var days_back = 1;
+function calculate_total_inventory_1(){
+  //read the lines from the sheet for the relevant date range (pick-up tomorrow?)
+  var today = new Date();
+  if (today.getMonth()>8){
+    var date = today.getFullYear()+'-'+(today.getMonth()+1)+'-'+(today.getDate()-days_back)+' 14:00:00 PDT';}
+  else{
+    var date = today.getFullYear()+'-0'+(today.getMonth()+1)+'-'+(today.getDate()-days_back)+' 14:00:00 PDT';};
+  var sheet = ss.getSheetByName(SHEET_NAME);
+  //sort the spreadsheet rows according to SKU in the Master Sheet
+  var all_dates = sheet.getRange(2, 5, sheet.getLastRow() - 1).getValues();
+  all_dates = all_dates.map(function(v) {return v[0];}); 
+  var all_product_names = sheet.getRange(2, 3, sheet.getLastRow() - 1).getValues();
+  all_product_names = all_product_names.map(function(v) {return v[0];}); 
+  var all_SKUs = sheet.getRange(2, 6, sheet.getLastRow() - 1).getValues();
+  all_SKUs = all_SKUs.map(function(v) {return v[0];}); 
+  var all_variants = sheet.getRange(2, 4, sheet.getLastRow() - 1).getValues();
+  all_variants = all_variants.map(function(v) {return v[0];}); 
+  var all_qty = sheet.getRange(2, 7, sheet.getLastRow() - 1).getValues();
+  all_qty = all_qty.map(function(v) {return v[0];}); 
+  var all_price = sheet.getRange(2, 8, sheet.getLastRow() - 1).getValues();
+  all_price = all_price.map(function(v) {return v[0];}); 
+  var inventory_list = [];
+  var ii = 0;
+  var keys = key_sheet.getRange(2, 4, key_sheet.getLastRow() - 1).getValues(); //this pulls all the SKUs
+  keys = keys.map(function(v) {return v[0];});  
+  var categories = key_sheet.getRange(2, 3, key_sheet.getLastRow() - 1).getValues(); //this pulls all the categories
+  categories = categories.map(function(v) {return v[0];}); 
+  all_dates.forEach(function(row, index){
+    var new_row = [
+      all_dates[index],
+      all_SKUs[index],
+      all_product_names[index]+all_variants[index],
+      all_qty[index],
+      all_price[index],
+      ];
+    //append the row number to that row
+    var sheet_row_index = keys.indexOf(all_SKUs[index]) + 2;
+    new_row.push(categories[keys.indexOf(all_SKUs[index])]);
+    new_row.push(sheet_row_index);
+    if(all_dates[index]>date){
+      inventory_list.push(new_row);
+      ii += 1;
+    }
+  });
+  //Logger.log(inventory_list)
+  //Logger.log(ii)
+  inventory_list.sort(function(a,b) {
+    var arank = a[a.length-1]; // column 1 is at the 0 index number
+    var brank = b[b.length-1]; // column 1 is at the 0 index number
+    if (arank < brank) {
+      return -1; // A is less than B, move B up
+    }
+    else if (arank > brank) {
+      return 1; // A is greater than B, move A down
+    }
+    return -1; // Returning -1 moves B up, basically reverses the list.
+  });
+  //Logger.log();
+  //run down the list and populate a new list with running count of each item to get a total quantity (do we want total paid?)
+  //put that list into an html table, and send an email with this summary
+  ii = 0;
+  var ITEM_NAME = inventory_list[0][1];
+  var ITEM_LONG_NAME = inventory_list[0][2];
+  var ITEM_REVENUE = inventory_list[0][3]*inventory_list[0][4];
+  var QTY = 0;
+  var TOTAL_REVENUE = 0;
+  var htmlBody = '<p>Inventory from orders since '+days_back+' days ago: </p><ol>';
+  inventory_list.forEach(function(row, index){
+    NEXT_ITEM_NAME = row[1];
+    NEXT_ITEM_LONG_NAME = row[2];
+    NEXT_ITEM_REVENUE = row[3]*row[4];
+    if(NEXT_ITEM_NAME == ITEM_NAME){
+      QTY += row[3];
+      ITEM_REVENUE += row[3]*row[4];
+      CATEGORY = row[5];
+    }
+    else{ //we've switched to the next item, so we can print out the html line for this item
+      htmlBody += '<li><b>'+ CATEGORY + '</b>, <i><br>' + ITEM_LONG_NAME +':</i><br>'+ QTY+', Revenue: $'+ITEM_REVENUE+'</li>';
+      TOTAL_REVENUE = TOTAL_REVENUE+ITEM_REVENUE;
+      ITEM_NAME = NEXT_ITEM_NAME;
+      ITEM_LONG_NAME = NEXT_ITEM_LONG_NAME;
+      ITEM_REVENUE = NEXT_ITEM_REVENUE;
+      QTY = row[3]; //reset the quantity to the new item that we're on
+      CATEGORY = row[5];
+    };
+  });
+  htmlBody += '<li><b>'+ CATEGORY + '</b>, <i><br>' + NEXT_ITEM_LONG_NAME +':</i><br>'+ QTY+', Revenue: $'+NEXT_ITEM_REVENUE+'</li>';
+  htmlBody = '<p>Total revenue: $'+ TOTAL_REVENUE + '</p>'+htmlBody;
+  GmailApp.sendEmail(WHOM_TO_EMAIL,'Inventory and revenue since '+date,'',{htmlBody:htmlBody})
+}
+
+
+var days_back = 7;
+function calculate_total_inventory_7(){
+  //read the lines from the sheet for the relevant date range (pick-up tomorrow?)
+  var today = new Date();
+  if (today.getMonth()>8){
+    var date = today.getFullYear()+'-'+(today.getMonth()+1)+'-'+(today.getDate()-days_back)+' 14:00:00 PDT';}
+  else{
+    var date = today.getFullYear()+'-0'+(today.getMonth()+1)+'-'+(today.getDate()-days_back)+' 14:00:00 PDT';};
+  var sheet = ss.getSheetByName(SHEET_NAME);
+  //sort the spreadsheet rows according to SKU in the Master Sheet
+  var all_dates = sheet.getRange(2, 5, sheet.getLastRow() - 1).getValues();
+  all_dates = all_dates.map(function(v) {return v[0];}); 
+  var all_product_names = sheet.getRange(2, 3, sheet.getLastRow() - 1).getValues();
+  all_product_names = all_product_names.map(function(v) {return v[0];}); 
+  var all_SKUs = sheet.getRange(2, 6, sheet.getLastRow() - 1).getValues();
+  all_SKUs = all_SKUs.map(function(v) {return v[0];}); 
+  var all_variants = sheet.getRange(2, 4, sheet.getLastRow() - 1).getValues();
+  all_variants = all_variants.map(function(v) {return v[0];}); 
+  var all_qty = sheet.getRange(2, 7, sheet.getLastRow() - 1).getValues();
+  all_qty = all_qty.map(function(v) {return v[0];}); 
+  var all_price = sheet.getRange(2, 8, sheet.getLastRow() - 1).getValues();
+  all_price = all_price.map(function(v) {return v[0];}); 
+  var inventory_list = [];
+  var ii = 0;
+  var keys = key_sheet.getRange(2, 4, key_sheet.getLastRow() - 1).getValues(); //this pulls all the SKUs
+  keys = keys.map(function(v) {return v[0];});  
+  var categories = key_sheet.getRange(2, 3, key_sheet.getLastRow() - 1).getValues(); //this pulls all the categories
+  categories = categories.map(function(v) {return v[0];}); 
+  all_dates.forEach(function(row, index){
+    var new_row = [
+      all_dates[index],
+      all_SKUs[index],
+      all_product_names[index]+all_variants[index],
+      all_qty[index],
+      all_price[index],
+      ];
+    //append the row number to that row
+    var sheet_row_index = keys.indexOf(all_SKUs[index]) + 2;
+    new_row.push(categories[keys.indexOf(all_SKUs[index])]);
+    new_row.push(sheet_row_index);
+    if(all_dates[index]>date){
+      inventory_list.push(new_row);
+      ii += 1;
+    }
+  });
+  //Logger.log(inventory_list)
+  //Logger.log(ii)
+  inventory_list.sort(function(a,b) {
+    var arank = a[a.length-1]; // column 1 is at the 0 index number
+    var brank = b[b.length-1]; // column 1 is at the 0 index number
+    if (arank < brank) {
+      return -1; // A is less than B, move B up
+    }
+    else if (arank > brank) {
+      return 1; // A is greater than B, move A down
+    }
+    return -1; // Returning -1 moves B up, basically reverses the list.
+  });
+  //Logger.log();
+  //run down the list and populate a new list with running count of each item to get a total quantity (do we want total paid?)
+  //put that list into an html table, and send an email with this summary
+  ii = 0;
+  var ITEM_NAME = inventory_list[0][1];
+  var ITEM_LONG_NAME = inventory_list[0][2];
+  var ITEM_REVENUE = inventory_list[0][3]*inventory_list[0][4];
+  var QTY = 0;
+  var TOTAL_REVENUE = 0;
+  var htmlBody = '<p>Inventory from orders since '+days_back+' ago: </p><ol>';
+  inventory_list.forEach(function(row, index){
+    NEXT_ITEM_NAME = row[1];
+    NEXT_ITEM_LONG_NAME = row[2];
+    NEXT_ITEM_REVENUE = row[3]*row[4];
+    if(NEXT_ITEM_NAME == ITEM_NAME){
+      QTY += row[3];
+      ITEM_REVENUE += row[3]*row[4];
+      CATEGORY = row[5];
+    }
+    else{ //we've switched to the next item, so we can print out the html line for this item
+      htmlBody += '<li><b>'+ CATEGORY + '</b>, <i><br>' + ITEM_LONG_NAME +':</i><br>'+ QTY+', Revenue: $'+ITEM_REVENUE+'</li>';
+      TOTAL_REVENUE = TOTAL_REVENUE+ITEM_REVENUE;
+      ITEM_NAME = NEXT_ITEM_NAME;
+      ITEM_LONG_NAME = NEXT_ITEM_LONG_NAME;
+      ITEM_REVENUE = NEXT_ITEM_REVENUE;
+      QTY = row[3]; //reset the quantity to the new item that we're on
+      CATEGORY = row[5];
+    };
+  });
+  htmlBody += '<li><b>'+ CATEGORY + '</b>, <i><br>' + NEXT_ITEM_LONG_NAME +':</i><br>'+ QTY+', Revenue: $'+NEXT_ITEM_REVENUE+'</li>';
+  htmlBody = '<p>Total revenue: $'+ TOTAL_REVENUE + '</p>'+htmlBody;
+  GmailApp.sendEmail(WHOM_TO_EMAIL,'Inventory and revenue since '+date,'',{htmlBody:htmlBody})
+}
+
+
+function importOrderData() {  
+  // pick up the search term from the Google Sheet
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  // when doing it automatically, set the sheet based on the variable.
+  if (activeSheet == null) {
+    sheet = ss.getSheetByName(SHEET_NAME);
+  } else {
+    sheet = activeSheet;
+  }
+  
+  
+  //var artist = sheet.getRange(11,2).getValue();
+  
+  var response = callSquareSpaceOrdersAPI();
+  var results = response["result"];
+  
+  var output = [];
+  
+  // loop through each order
+  if (results) {
+    results.forEach(function(order,orderIndex) {
+      // orders can have multiple unrelated line items: loop through them too.
+      if (order['lineItems']) {
+        order['lineItems'].forEach(function(lineItem,lineItemIndex) {
+          //if(DEBUG>=2){Logger.log(lineItemIndex+": "+JSON.stringify(lineItem));}
+          //if(DEBUG>=2){Logger.log(lineItemIndex+": "+lineItem['unitPricePaid']);}
+          unitPrice = lineItem['unitPricePaid']['value'];
+          //if(DEBUG>=2){Logger.log(orderIndex+": "+order['grandTotal']);}
+          grandTotal = order['grandTotal']['value'];
+          orderDate = new Date(order["createdOn"]);
+          orderDateStr = Utilities.formatDate(orderDate, TIMEZONE, "yyyy-MM-dd HH:mm:ss z");
+          
+          // extract class date, name, phone, and notes if they exist
+          variantvals = [];
+          customerName = null;
+          customerPhone = null;
+          additionalInfoArray = [];
+          isMember = null;
+          if (lineItem["variantOptions"]) {
+            lineItem["variantOptions"].forEach(function(variant){
+              variantvals += '<b>'+variant["optionName"]+':</b> '+variant["value"]+'; ';
+            });
+          }
+          // start by assuming name/phone from the address, overwrite it below if provided
+          if (order["billingAddress"]){
+            customerName = [order["billingAddress"]["firstName"],order["billingAddress"]["lastName"]].join(" "); // full name is first/last joined by a space
+            customerPhone = order["billingAddress"]["phone"];
+          }
+          if (lineItem["customizations"]) {
+            lineItem["customizations"].forEach(function(customization){
+              if (customization["label"] == "Name" && customization["value"] != "" && customization["value"] != " ") {
+                customerName = customization["value"];
+              }
+              if (customization["label"] == "Phone Number" && customization["value"] != "" && customization["value"] != " ") {
+                customerPhone = customization["value"];
+              }
+              if (customization["label"] == "Are you currently a Chimera member?" && customization["value"] != "" && customization["value"] != " ") {
+                isMember = customization["value"];
+              }
+            });
+          }
+          // append additional info together in the notes field separated by a semicolon
+          //{"label":"Please indicate the date you are picking up your order (earliest possible is tomorrow).","value":"2020-05-20"},{"label":"Please indicate what time you can pick up your order.","value":"5:45-6:00PM"}
+          if (order["formSubmission"]) {
+            order["formSubmission"].forEach(function(submissionInfo){
+              if (submissionInfo["label"] == "Please indicate the date you are picking up your order (earliest possible is tomorrow)." && submissionInfo["value"] != "" && submissionInfo["value"] != " ") {
+                additionalInfoArray.push("Pick up date: "+submissionInfo["value"]);
+              }
+              if (submissionInfo["label"] == "Please indicate what time you can pick up your order." && submissionInfo["value"] != "" && submissionInfo["value"] != " ") {
+                additionalInfoArray.push("Pick up time: "+submissionInfo["value"]);
+              }
+            });
+          }
+          additionalInfo = additionalInfoArray.join("; ");
+          
+          // Make this row match the header titles below exactly.
+          row = [
+            JSON.stringify(order),
+            customerName,
+            lineItem["productName"],
+            variantvals,
+            orderDateStr,
+            lineItem["sku"],
+            lineItem["quantity"],
+            "$"+unitPrice,
+            customerPhone,
+            order["customerEmail"],
+              additionalInfo,
+                isMember
+                ];
+          output.push(row);
+        });
+      }
+    });
+  }
+
+  // custom comparator function to sort by date
+  var sortedOutput = output.sort( function(a,b) {
+    var orderADate = a[SORT_COLUMN-1]; // column 1 is at the 0 index number
+    var orderBDate = b[SORT_COLUMN-1]; // column 1 is at the 0 index number
+    if (orderADate < orderBDate) {
+      return -1; // A is less than B, move B up
+    }
+    else if (orderADate > orderBDate) {
+      return 1; // A is greater than B, move A down
+    }
+    return -1; // Returning -1 moves B up, basically reverses the list.
+  });
+
+  // set names for each column of output
+  var header = [
+    "Imported E-Mail Data",
+    "Attendee Name",
+    "Purchased",
+    "Variant Info",
+    "Order placed on",
+    "SKU",
+    "Qty",
+    'Unit Price',
+    "Phone",
+    "E-mail",
+    "Additional Info",
+    "Member?"
+  ];
+  // this variable needs to be the column number (starting at 1) of the Order Date (Order Placed On) column.
+  var ORDER_DATE_COLUMN_NUMBER = 5;
+  var SKU_COLUMN_NUMBER = 4;
+  // calculate width and length
+  var columnCount = header.length;
+  var rowCount = sortedOutput.length;
+
+  lastInsertedRowNumber = sheet.getLastRow(); // gotta pick somewhere to start, let's start at the last row number
+  lastInsertedOrderDate = sheet.getRange(lastInsertedRowNumber, ORDER_DATE_COLUMN_NUMBER).getValue(); // get the last order date inserted into the DB.
+  Logger.log(lastInsertedRowNumber)
+  is_updated = 0;
+  new_order = [];
+  previousInsertedOrderDate = lastInsertedOrderDate;
+  sortedOutput.forEach(function(row, index){
+    if (row[ORDER_DATE_COLUMN_NUMBER-1] > lastInsertedOrderDate) { //lastInsertedOrderDate no longer updates. So this sheet will fill only with new information relative to the last retrieval
+      is_updated = 1;
+      thisRowNumber = lastInsertedRowNumber+1;
+      sheet.getRange(thisRowNumber,1,1,columnCount).clearContent();
+      sheet.getRange(thisRowNumber,1,1,columnCount).setValues([row]); // gotta put the row inside an array cuz setValues accepts two dimensions
+      lastInsertedRowNumber = thisRowNumber;
+      if (row[ORDER_DATE_COLUMN_NUMBER-1] > previousInsertedOrderDate){
+        //send previous order as a sorted email, grouping PAGU items, fresh produce, dry goods
+        Logger.log(new_order.length)
+        if (new_order.length>0){
+          send_order_email(new_order);}
+        //start to log a new set of orders
+        new_order = [];
+        new_order.push(row);
+      }
+      else {new_order.push(row)};
+      previousInsertedOrderDate = row[ORDER_DATE_COLUMN_NUMBER-1];
+    }
+  });
+  
+  if (is_updated == 1){send_order_email(new_order)}; //ensures that the most recent order is sent as an email
+}
