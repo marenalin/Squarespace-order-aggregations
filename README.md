@@ -10,7 +10,7 @@ Set the name of the inventory sheet:
 var MASTER_SHEET_NAME = "Master (Reformatted)"; //key with all the product SKUs and categories are
 
 Set the email address that will receive these packing lists and inventory aggregations:
-var WHOM_TO_EMAIL = "orders@gopagu.com"; //which email address are you sending the packing list to?
+var WHOM_TO_EMAIL = "orders@somerestaurant.com"; //which email address are you sending the packing list to?
 
 The columns of the master SKUs sheet are ordered as the following:
 [A] ITEM 
